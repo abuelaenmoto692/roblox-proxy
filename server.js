@@ -1,4 +1,84 @@
-// Nuevo método usando thumbnails
+// server.js - Servidor Proxy CON AUTENTICACIÓN
+const express = require('express');
+const fetch = require('node-fetch');
+const cors = require('cors');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// ⚠️ TU COOKIE .ROBLOSECURITY (Necesaria para obtener placeId)
+// OBTÉN TU COOKIE: https://www.youtube.com/watch?v=W3qyqHZJx9I
+const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE || '';
+
+app.use(cors());
+app.use(express.json());
+
+// Ruta principal
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    message: 'Roblox Presence Proxy API v2',
+    authenticated: ROBLOX_COOKIE.length > 0,
+    endpoints: {
+      presence: '/api/presence/:userId',
+      universeToPlace: '/api/universe/:universeId',
+      test: '/api/test'
+    }
+  });
+});
+
+// Test
+app.get('/api/test', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Servidor funcionando!',
+    authenticated: ROBLOX_COOKIE.length > 0,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Convertir UniverseId a PlaceId
+app.get('/api/universe/:universeId', async (req, res) => {
+  const universeId = parseInt(req.params.universeId);
+  
+  if (isNaN(universeId)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid universeId'
+    });
+  }
+  
+  try {
+    // API pública que SÍ funciona sin auth
+    const response = await fetch(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
+    const data = await response.json();
+    
+    if (data.data && data.data.length > 0) {
+      return res.json({
+        success: true,
+        data: {
+          universeId: universeId,
+          rootPlaceId: data.data[0].rootPlaceId,
+          name: data.data[0].name,
+          creator: data.data[0].creator
+        }
+      });
+    } else {
+      return res.json({
+        success: false,
+        error: 'Universe not found'
+      });
+    }
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Obtener presencia CON autenticación
 app.get('/api/presence/:userId', async (req, res) => {
   const userId = parseInt(req.params.userId);
   
@@ -10,36 +90,60 @@ app.get('/api/presence/:userId', async (req, res) => {
   }
   
   try {
-    console.log('Buscando usuario:', userId);
+    console.log('🔍 Buscando userId:', userId);
     
-    // Método 1: Obtener presencia básica
-    const presenceRes = await fetch('https://presence.roproxy.com/v1/presence/users', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({userIds: [userId]})
-    });
+    const headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Roblox/WinInet'
+    };
     
-    const presenceData = await presenceRes.json();
-    const presence = presenceData.userPresences?.[0];
-    
-    if (!presence) {
-      return res.json({success: false, error: 'User not found'});
+    // Agregar cookie si existe
+    if (ROBLOX_COOKIE) {
+      headers['Cookie'] = `.ROBLOSECURITY=${ROBLOX_COOKIE}`;
+      console.log('✅ Usando autenticación');
+    } else {
+      console.log('⚠️  Sin autenticación - placeId será null');
     }
     
-    // Si tiene gameId o universeId, intentar obtener el placeId
-    let placeId = presence.placeId;
+    // Petición a la API de presencia
+    const response = await fetch('https://presence.roblox.com/v1/presence/users', {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({
+        userIds: [userId]
+      })
+    });
     
+    if (!response.ok) {
+      throw new Error(`API error: ${response.status}`);
+    }
+    
+    const data = await response.json();
+    console.log('📡 Respuesta:', JSON.stringify(data));
+    
+    if (!data.userPresences || data.userPresences.length === 0) {
+      return res.json({
+        success: false,
+        error: 'User not found'
+      });
+    }
+    
+    const presence = data.userPresences[0];
+    let placeId = presence.placeId || presence.rootPlaceId;
+    
+    // Si no hay placeId pero hay universeId, convertirlo
     if (!placeId && presence.universeId) {
+      console.log('🔄 Convirtiendo universeId a placeId...');
       try {
-        const gameRes = await fetch(`https://games.roproxy.com/v1/games?universeIds=${presence.universeId}`);
+        const gameRes = await fetch(`https://games.roblox.com/v1/games?universeIds=${presence.universeId}`);
         const gameData = await gameRes.json();
         
         if (gameData.data && gameData.data[0]) {
           placeId = gameData.data[0].rootPlaceId;
-          console.log('PlaceId obtenido:', placeId);
+          console.log('✅ PlaceId obtenido:', placeId);
         }
       } catch (e) {
-        console.log('Error obteniendo placeId:', e);
+        console.log('❌ Error convirtiendo:', e.message);
       }
     }
     
@@ -50,16 +154,30 @@ app.get('/api/presence/:userId', async (req, res) => {
         userPresenceType: presence.userPresenceType,
         lastLocation: presence.lastLocation || 'Unknown',
         placeId: placeId,
+        rootPlaceId: presence.rootPlaceId,
+        gameId: presence.gameId,
         universeId: presence.universeId,
-        gameId: presence.gameId
+        lastOnline: presence.lastOnline
       }
     });
     
   } catch (error) {
-    console.error('Error:', error);
+    console.error('❌ Error:', error);
     return res.status(500).json({
       success: false,
       error: error.message
     });
   }
+});
+
+// Iniciar servidor
+app.listen(PORT, () => {
+  console.log('========================================');
+  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`🔐 Autenticación: ${ROBLOX_COOKIE ? 'ACTIVADA ✅' : 'DESACTIVADA ⚠️'}`);
+  if (!ROBLOX_COOKIE) {
+    console.log('⚠️  Agrega ROBLOX_COOKIE para obtener placeId');
+    console.log('📖 Guía: https://www.youtube.com/watch?v=W3qyqHZJx9I');
+  }
+  console.log('========================================');
 });
